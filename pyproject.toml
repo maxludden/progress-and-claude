@@ -1,0 +1,60 @@
+[project]
+name = "progress-and-claude"
+version = "0.1.0"
+description = "Accurate task/subtask progress bars for Claude: an MCP server (with an MCP Apps UI), a Typer + Rich CLI, and a Textual TUI."
+readme = "README.md"
+authors = [
+    { name = "Claude", email = "noreply@anthropic.com" }
+]
+requires-python = ">=3.13"
+keywords = ["claude", "mcp", "progress", "textual", "typer", "rich"]
+dependencies = [
+    "anthropic>=2.1.0",
+    "loguru>=0.7.3",
+    "mcp>=2.3.0",
+    "platformdirs>=4.13.5",
+    "pydantic>=2.14.1",
+    "rich>=15.0.0",
+    "textual>=8.2.8",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+progress-and-claude = "progress_and_claude.cli.app:main"
+progress-and-claude-mcp = "progress_and_claude.mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.2",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "D"]
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+"src/progress_and_claude/core/store.py" = ["E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

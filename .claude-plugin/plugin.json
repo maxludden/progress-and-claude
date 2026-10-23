@@ -1,0 +1,10 @@
+{
+  "name": "progress-and-claude",
+  "version": "0.1.0",
+  "description": "Accurate task/subtask progress bars for Claude: plan work, report progress, and watch it live in a rich CLI, a Textual TUI, or an in-chat MCP Apps view.",
+  "author": {
+    "name": "Max Ludden",
+    "email": "maxludden@gmail.com"
+  },
+  "keywords": ["progress", "tasks", "mcp", "tui", "cli"]
+}
