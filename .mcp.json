@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "progress-and-claude": {
+      "command": "uvx",
+      "args": ["--from", "${CLAUDE_PLUGIN_ROOT}", "progress-and-claude-mcp"]
+    }
+  }
+}

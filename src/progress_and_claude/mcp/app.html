@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Progress board</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: var(--color-background-primary, light-dark(#ffffff, #1b1b1b));
+    --fg: var(--color-text-primary, light-dark(#1a1a1a, #f2f2f2));
+    --muted: var(--color-text-secondary, light-dark(#666a70, #a3a7ad));
+    --track: light-dark(#e6e8eb, #34373b);
+    --line: light-dark(#d9dce0, #3a3d41);
+    --run: light-dark(#0b6fd1, #5aaeff);
+    --ok: light-dark(#1a7f45, #4cc884);
+    --bad: light-dark(#c62828, #ff7b72);
+    --idle: light-dark(#8a8f96, #7b8087);
+    --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 var(--font); }
+  main { padding: 12px 16px 14px; }
+  header { display: grid; gap: 6px; margin-bottom: 10px; }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  .summary { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .bar { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 4px; background: var(--run); transition: width .35s ease; }
+  .bar.lg { height: 12px; border-radius: 6px; }
+  .bar.indet > i { width: 35% !important; animation: slide 1.2s ease-in-out infinite alternate; }
+  @keyframes slide { from { margin-left: 0; } to { margin-left: 65%; } }
+  @media (prefers-reduced-motion: reduce) {
+    .bar > i { transition: none; }
+    .bar.indet > i { animation: none; margin-left: 0; width: 100% !important; opacity: .45; }
+  }
+  .bar.done > i { background: var(--ok); }
+  .bar.failed > i { background: var(--bad); }
+  .bar.pending > i, .bar.skipped > i { background: var(--idle); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  ul ul { margin-left: 11px; padding-left: 12px; border-left: 1px solid var(--line); }
+  li { margin: 0; }
+  .row { display: grid; grid-template-columns: 18px minmax(0, 1fr) 44px; align-items: center;
+         column-gap: 6px; padding: 5px 0; }
+  .row button { all: unset; cursor: pointer; width: 18px; height: 18px; text-align: center;
+                color: var(--muted); border-radius: 4px; font-size: 11px; }
+  .row button:focus-visible { outline: 2px solid var(--run); }
+  .row .spacer { width: 18px; }
+  .name { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+  .name b { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .glyph { font-size: 12px; width: 14px; flex: none; text-align: center; }
+  .glyph.running { color: var(--run); } .glyph.done { color: var(--ok); }
+  .glyph.failed { color: var(--bad); } .glyph.pending, .glyph.skipped { color: var(--idle); }
+  .skipped .name b { text-decoration: line-through; color: var(--muted); }
+  .pct { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+  .sub { grid-column: 2 / 4; display: grid; gap: 3px; }
+  .meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .meta .bad { color: var(--bad); }
+  .empty, .status { color: var(--muted); padding: 18px 0; text-align: center; }
+  .collapsed > ul { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header id="head" hidden>
+    <h1 id="title"></h1>
+    <div class="bar lg" role="progressbar" aria-label="Overall progress" aria-valuemin="0"
+         aria-valuemax="100" id="overall"><i></i></div>
+    <div class="summary" id="summary"></div>
+  </header>
+  <ul id="tree"></ul>
+  <div class="status" id="status">Waiting for progress&hellip;</div>
+</main>
+<script>
+"use strict";
+// Minimal MCP Apps "View" (ext-apps spec 2026-01-26): JSON-RPC 2.0 over window.postMessage.
+const PROTOCOL_VERSION = "2026-01-26";
+const POLL_MS = 2000;
+const STATUS_GLYPH = { pending: "○", running: "▶", done: "✔", failed: "✘", skipped: "⊘" };
+
+const els = {
+  head: document.getElementById("head"), title: document.getElementById("title"),
+  overall: document.getElementById("overall"), summary: document.getElementById("summary"),
+  tree: document.getElementById("tree"), status: document.getElementById("status"),
+};
+const state = { board: null, revision: -1, collapsed: new Set(), timer: null, stopped: false };
+let nextId = 1;
+const pending = new Map();
+
+function post(message) { window.parent.postMessage({ jsonrpc: "2.0", ...message }, "*"); }
+function request(method, params) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    post({ id, method, params });
+  });
+}
+function notify(method, params) { post({ method, params }); }
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;
+  const msg = event.data;
+  if (!msg || msg.jsonrpc !== "2.0") return;
+  if (msg.method === undefined && msg.id !== undefined) {
+    const waiter = pending.get(msg.id);
+    if (!waiter) return;
+    pending.delete(msg.id);
+    if (msg.error) waiter.reject(new Error(msg.error.message || "request failed"));
+    else waiter.resolve(msg.result);
+    return;
+  }
+  switch (msg.method) {
+    case "ui/notifications/tool-result": onToolResult(msg.params); break;
+    case "ui/notifications/tool-input": {
+      const board = msg.params && msg.params.arguments && msg.params.arguments.board;
+      if (board) state.board = board;
+      break;
+    }
+    case "ui/notifications/host-context-changed": applyHostContext(msg.params); break;
+    case "ui/notifications/tool-cancelled": setStatus("Cancelled."); break;
+    case "ui/resource-teardown":
+      state.stopped = true; clearInterval(state.timer);
+      if (msg.id !== undefined) post({ id: msg.id, result: {} });
+      break;
+    default:
+      if (msg.id !== undefined) post({ id: msg.id, error: { code: -32601, message: "Method not found" } });
+  }
+});
+
+function applyHostContext(ctx) {
+  if (!ctx) return;
+  if (ctx.theme) document.documentElement.dataset.theme = ctx.theme;
+  const vars = ctx.styles && ctx.styles.variables;
+  if (vars) for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v);
+  if (ctx.styles && ctx.styles.css && ctx.styles.css.fonts) {
+    const style = document.createElement("style");
+    style.textContent = ctx.styles.css.fonts;
+    document.head.appendChild(style);
+  }
+}
+
+function setStatus(text) { els.status.textContent = text; els.status.hidden = !text; }
+
+function onToolResult(result) {
+  if (!result) return;
+  if (result.isError) {
+    const text = (result.content || []).map((c) => c.text || "").join(" ").trim();
+    if (!state.board) setStatus(text || "The tool reported an error.");
+    return;
+  }
+  const snap = result.structuredContent;
+  if (snap && Array.isArray(snap.tasks)) { state.board = snap.board; render(snap); schedulePolling(); }
+}
+
+function schedulePolling() {
+  if (state.timer || state.stopped) return;
+  state.timer = setInterval(refresh, POLL_MS);
+}
+
+async function refresh() {
+  if (!state.board || state.stopped || document.hidden) return;
+  try {
+    const result = await request("tools/call", { name: "get_board_state", arguments: { board: state.board } });
+    if (result && result.structuredContent && Array.isArray(result.structuredContent.tasks)) {
+      if (result.structuredContent.revision !== state.revision) render(result.structuredContent);
+    }
+  } catch (err) { /* transient: keep the last good render and retry on the next tick */ }
+}
+
+function pctOf(task) {
+  if (task.status === "done") return 100;
+  if (task.progress == null) return null;
+  return Math.min(99, Math.max(0, Math.floor(task.progress * 100 + 1e-9)));
+}
+function duration(seconds) {
+  const s = Math.round(seconds);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + String(s % 60).padStart(2, "0") + "s";
+  return Math.floor(m / 60) + "h " + String(m % 60).padStart(2, "0") + "m";
+}
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function bar(task, large) {
+  const wrap = el("div", "bar " + task.status + (large ? " lg" : "") + (task.indeterminate ? " indet" : ""));
+  const fill = document.createElement("i");
+  const pct = pctOf(task);
+  fill.style.width = (task.indeterminate ? 35 : (pct == null ? 0 : task.status === "done" ? 100 : task.progress * 100)) + "%";
+  wrap.appendChild(fill);
+  wrap.setAttribute("role", "progressbar");
+  wrap.setAttribute("aria-label", task.name || "Progress");
+  wrap.setAttribute("aria-valuemin", "0");
+  wrap.setAttribute("aria-valuemax", "100");
+  if (!task.indeterminate && pct != null) wrap.setAttribute("aria-valuenow", String(pct));
+  return wrap;
+}
+
+function taskNode(task) {
+  const li = el("li", task.status);
+  if (task.children.length && state.collapsed.has(task.id)) li.classList.add("collapsed");
+  const row = el("div", "row");
+  if (task.children.length) {
+    const toggle = el("button", "", state.collapsed.has(task.id) ? "▸" : "▾");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", String(!state.collapsed.has(task.id)));
+    toggle.setAttribute("aria-label", "Toggle subtasks of " + task.name);
+    toggle.addEventListener("click", () => {
+      if (state.collapsed.has(task.id)) state.collapsed.delete(task.id); else state.collapsed.add(task.id);
+      const open = !state.collapsed.has(task.id);
+      li.classList.toggle("collapsed", !open);
+      toggle.textContent = open ? "▾" : "▸";
+      toggle.setAttribute("aria-expanded", String(open));
+      reportSize();
+    });
+    row.appendChild(toggle);
+  } else row.appendChild(el("span", "spacer"));
+
+  const name = el("div", "name");
+  name.appendChild(el("span", "glyph " + task.status, STATUS_GLYPH[task.status] || ""));
+  const label = el("b", "", task.name);
+  label.title = task.description || task.name;
+  name.appendChild(label);
+  row.appendChild(name);
+  const pct = pctOf(task);
+  row.appendChild(el("span", "pct", task.indeterminate ? "…" : pct == null ? "–" : pct + "%"));
+
+  const sub = el("div", "sub");
+  sub.appendChild(bar(task, false));
+  const meta = [];
+  if (!task.children.length && task.total) meta.push(task.completed + "/" + task.total);
+  if (task.blocked) meta.push("blocked");
+  if (task.eta_seconds != null && task.status === "running") meta.push("~" + duration(task.eta_seconds) + " left");
+  if (task.note) meta.push(task.note);
+  if (task.description) meta.unshift(task.description);
+  if (meta.length) {
+    const m = el("div", "meta");
+    m.textContent = meta.join(" · ");
+    if (task.status === "failed") m.classList.add("bad");
+    sub.appendChild(m);
+  }
+  row.appendChild(sub);
+  li.appendChild(row);
+  if (task.children.length) {
+    const ul = el("ul");
+    task.children.forEach((child) => ul.appendChild(taskNode(child)));
+    li.appendChild(ul);
+  }
+  return li;
+}
+
+function render(snap) {
+  state.revision = snap.revision;
+  els.head.hidden = false;
+  els.title.textContent = snap.title;
+  const overall = { name: snap.title, status: snap.progress === 1 ? "done" : snap.failed && snap.done + snap.failed >= snap.total ? "failed" : "running",
+                    progress: snap.progress, indeterminate: false };
+  const pct = pctOf(overall);
+  const fill = els.overall.firstElementChild;
+  fill.style.width = (snap.progress == null ? 0 : snap.progress * 100) + "%";
+  els.overall.className = "bar lg " + overall.status;
+  if (pct != null) els.overall.setAttribute("aria-valuenow", String(pct));
+  const parts = [(pct == null ? "–" : pct) + "%", snap.done + "/" + snap.total + " done"];
+  if (snap.failed) parts.push(snap.failed + " failed");
+  if (snap.eta_seconds != null) parts.push("~" + duration(snap.eta_seconds) + " left");
+  els.summary.textContent = parts.join(" · ");
+  els.tree.replaceChildren(...snap.tasks.map(taskNode));
+  setStatus(snap.tasks.length ? "" : "No tasks yet.");
+  reportSize();
+}
+
+let lastHeight = 0;
+function reportSize() {
+  requestAnimationFrame(() => {
+    const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
+    if (height === lastHeight) return;
+    lastHeight = height;
+    notify("ui/notifications/size-changed", { width: Math.ceil(window.innerWidth), height });
+  });
+}
+new ResizeObserver(reportSize).observe(document.body);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+(async function init() {
+  if (window.parent === window) { setStatus("Open this view from an MCP Apps host."); return; }
+  try {
+    const init = await request("ui/initialize", {
+      protocolVersion: PROTOCOL_VERSION, capabilities: {},
+      clientInfo: { name: "progress-and-claude", version: "0.1.0" },
+    });
+    applyHostContext(init && init.hostContext);
+    notify("ui/notifications/initialized", {});
+  } catch (err) {
+    setStatus("Could not connect to the host: " + err.message);
+  }
+})();
+</script>
+</body>
+</html>
