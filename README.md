@@ -81,6 +81,8 @@ The MCP server writes nothing to stdout except protocol messages; logs go to std
 
 ```bash
 uv run ruff check . && uv run ruff format --check .
-uv run mypy src
+uv run mypy src tests
 uv run pytest
 ```
+
+CI (`.github/workflows/ci.yml`) runs exactly these checks, after `uv sync --locked`, on every pull request and on pushes to `main`.
